@@ -11,13 +11,28 @@ android {
         applicationId = "com.collage.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // CI passes the run number and tag so every published build installs over the last one.
+        versionCode = providers.environmentVariable("VERSION_CODE").orNull?.toInt() ?: 1
+        versionName = providers.environmentVariable("VERSION_NAME").orNull ?: "1.0"
+    }
+
+    // Release signing comes from the environment (CI secrets). Without it, release builds are unsigned.
+    val releaseKeystore = providers.environmentVariable("SIGNING_STORE_FILE").orNull
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = providers.environmentVariable("SIGNING_STORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("SIGNING_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("SIGNING_KEY_PASSWORD").get()
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 
