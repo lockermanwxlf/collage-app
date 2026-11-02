@@ -1,7 +1,5 @@
 package com.collage.app.ui
 
-import android.graphics.BitmapFactory
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -34,28 +33,24 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.collage.app.CollageViewModel
 import com.collage.app.Screen
 import com.collage.app.model.Template
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.File
 
 /** Pending action that would replace the collage currently being edited. */
@@ -77,7 +72,23 @@ fun HomeScreen(vm: CollageViewModel) {
     }
     val request = { r: Replace -> if (vm.slots.isNotEmpty()) confirmReplace = r else run(r) }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Collage") }) }) { padding ->
+    val snackbar = rememberMessageSnackbar(vm)
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Collage") },
+                actions = {
+                    TextButton(onClick = { vm.screen = Screen.Palette }, modifier = Modifier.padding(end = 8.dp)) {
+                        Icon(Icons.Default.Palette, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Palette")
+                    }
+                },
+            )
+        },
+    ) { padding ->
         LazyVerticalGrid(
             columns = GridCells.Adaptive(160.dp),
             modifier = Modifier.padding(padding).fillMaxSize(),
@@ -152,17 +163,12 @@ fun HomeScreen(vm: CollageViewModel) {
 
 @Composable
 private fun TemplateCard(template: Template, thumbnail: File, enabled: Boolean, onOpen: () -> Unit, onDelete: () -> Unit) {
-    val image by produceState<ImageBitmap?>(null, thumbnail) {
-        value = withContext(Dispatchers.IO) {
-            runCatching { BitmapFactory.decodeFile(thumbnail.path)?.asImageBitmap() }.getOrNull()
-        }
-    }
     Card(Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onOpen)) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(3f / 4f).background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
-            image?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+            FileImage(thumbnail, ContentScale.Fit, Modifier.fillMaxSize())
         }
         Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(vertical = 8.dp)) {

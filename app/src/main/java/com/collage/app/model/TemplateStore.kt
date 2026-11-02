@@ -17,11 +17,13 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Templates live in `files/templates` as `<id>.json` plus a `<id>.png` thumbnail. All methods
- * block on disk or media access, so call them off the main thread.
+ * Templates live in `files/templates` as `<id>.json` plus a `<id>.png` thumbnail, and the
+ * autosaved in-progress collage in `files/session.json`. All methods block on disk or media
+ * access, so call them off the main thread.
  */
 class TemplateStore(private val context: Context) {
     private val dir = File(context.filesDir, "templates").apply { mkdirs() }
+    private val sessionFile = File(context.filesDir, "session.json")
 
     fun thumbnailFile(id: String) = File(dir, "$id.png")
 
@@ -56,11 +58,18 @@ class TemplateStore(private val context: Context) {
         runCatching {
             thumbnailFile(t.id).outputStream().use { renderThumbnail(t.slots, ratio).compress(Bitmap.CompressFormat.PNG, 100, it) }
         }
-        // Write to a temp file first so a crash never leaves a half-written template behind.
-        val tmp = File(dir, "${t.id}.json.tmp")
-        tmp.writeText(t.toJson().toString())
-        check(tmp.renameTo(File(dir, "${t.id}.json"))) { "Could not save template" }
+        File(dir, "${t.id}.json").writeTextAtomically(t.toJson().toString())
         return t
+    }
+
+    /** The in-progress collage, autosaved in the template format, or null if there is none. */
+    fun loadSession(): Template? =
+        runCatching { Template.fromJson(JSONObject(sessionFile.readText())) }.getOrNull()
+
+    /** Saves the in-progress collage; null removes it. Safe to call from any thread. */
+    @Synchronized
+    fun writeSession(session: Template?) {
+        if (session == null) sessionFile.delete() else sessionFile.writeTextAtomically(session.toJson().toString())
     }
 
     fun delete(id: String) {
@@ -87,8 +96,8 @@ class TemplateStore(private val context: Context) {
 
     /**
      * Gives back persisted read grants that no template uses. Grants are taken as soon as media
-     * is picked (the session might be saved later), so unsaved sessions leave some behind.
-     * Only call this when no editor session is holding media.
+     * is picked (the session might be saved later), so discarded sessions leave some behind.
+     * Pass the autosaved session along with the templates so its media stays readable.
      */
     fun releaseUnusedUriPermissions(templates: List<Template>) {
         val used = templates.flatMap { t -> t.slots.mapNotNull { it?.uri } }.toSet()

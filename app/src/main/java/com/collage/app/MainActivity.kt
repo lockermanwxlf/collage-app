@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.collage.app.model.Ratio
 import com.collage.app.ui.EditorScreen
 import com.collage.app.ui.HomeScreen
+import com.collage.app.ui.PaletteScreen
 import kotlin.math.max
 import kotlin.math.min
 
@@ -40,9 +41,16 @@ class MainActivity : ComponentActivity() {
                 when (vm.screen) {
                     Screen.Home -> HomeScreen(vm)
                     Screen.Editor -> EditorScreen(vm)
+                    Screen.Palette -> PaletteScreen(vm)
                 }
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Autosave waits for edits to settle; don't lose the last ones if the app is killed now.
+        vm.flushSession()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

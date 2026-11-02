@@ -34,6 +34,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FilterCenterFocus
 import androidx.compose.material.icons.filled.HideImage
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -50,20 +52,17 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -77,7 +76,6 @@ import com.collage.app.model.AspectOption
 import com.collage.app.model.ClipItem
 import com.collage.app.model.CollageLayout
 import com.collage.app.model.Ratio
-import kotlinx.coroutines.flow.filterNotNull
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -97,15 +95,19 @@ fun EditorScreen(vm: CollageViewModel) {
         fillTarget = id
         slotPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
     }
-    var showTrim by remember { mutableStateOf(false) }
-    var showSave by remember { mutableStateOf(false) }
-    val snackbar = remember { SnackbarHostState() }
-    LaunchedEffect(Unit) {
-        snapshotFlow { vm.message }.filterNotNull().collect { m ->
-            vm.message = null
-            snackbar.showSnackbar(m)
+    val fromDevice = { target: MediaTarget ->
+        when (target) {
+            MediaTarget.Add -> picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+            is MediaTarget.Fill -> pickForSlot(target.id)
         }
     }
+    var chooser by remember { mutableStateOf<MediaTarget?>(null) }
+    // The palette sheet only gets in the way until the palette has something in it.
+    val chooseMedia = { target: MediaTarget -> if (vm.paletteItems.isEmpty()) fromDevice(target) else chooser = target }
+    var showTrim by remember { mutableStateOf(false) }
+    var showSave by remember { mutableStateOf(false) }
+    var savingToPalette by remember { mutableStateOf<Long?>(null) }
+    val snackbar = rememberMessageSnackbar(vm)
     BackHandler { vm.screen = Screen.Home }
     var showDuration by remember { mutableStateOf(false) }
     var showCustomRatio by remember { mutableStateOf(false) }
@@ -162,7 +164,7 @@ fun EditorScreen(vm: CollageViewModel) {
                     selectedId = vm.selectedId,
                     onSelect = { vm.selectedId = it },
                     onTransform = vm::setTransform,
-                    onFillEmpty = pickForSlot,
+                    onFillEmpty = { chooseMedia(MediaTarget.Fill(it)) },
                     modifier = canvasModifier,
                 )
                 if (vm.slots.isEmpty()) {
@@ -180,15 +182,18 @@ fun EditorScreen(vm: CollageViewModel) {
                         .navigationBarsPadding()
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                 ) {
-                    SelectionTools(vm, onTrim = { showTrim = true }, onFill = pickForSlot)
+                    SelectionTools(
+                        vm,
+                        onTrim = { showTrim = true },
+                        onFill = { chooseMedia(MediaTarget.Fill(it)) },
+                        onSaveToPalette = { savingToPalette = it },
+                    )
                     Row(
                         Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        FilledTonalButton(onClick = {
-                            picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                        }) {
+                        FilledTonalButton(onClick = { chooseMedia(MediaTarget.Add) }) {
                             Icon(Icons.Default.Add, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("Add media")
@@ -209,7 +214,8 @@ fun EditorScreen(vm: CollageViewModel) {
                     val empty = vm.emptySlotCount
                     Text(
                         "${vm.slots.size} slots · $ow×$oh · 30 fps" +
-                            if (empty > 0) " · fill $empty empty ${if (empty == 1) "slot" else "slots"} to export" else "",
+                            (if (empty > 0) " · fill $empty empty ${if (empty == 1) "slot" else "slots"} to export" else "") +
+                            if (vm.paletteImporting > 0) " · copying to palette…" else "",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -241,6 +247,27 @@ fun EditorScreen(vm: CollageViewModel) {
             onConfirm = { vm.customRatio = it; vm.aspect = AspectOption.Custom; showCustomRatio = false },
         )
     }
+    chooser?.let { target ->
+        PaletteSheet(
+            vm,
+            multiple = target == MediaTarget.Add,
+            onFromDevice = { chooser = null; fromDevice(target) },
+            onPick = { picked ->
+                chooser = null
+                when (target) {
+                    MediaTarget.Add -> vm.addFromPalette(picked)
+                    is MediaTarget.Fill -> vm.fillSlotFromPalette(target.id, picked.first())
+                }
+            },
+            onDismiss = { chooser = null },
+        )
+    }
+    savingToPalette?.let { id ->
+        FolderPickerDialog(vm, "Save to palette", null, "Save", onDismiss = { savingToPalette = null }) { folderId ->
+            vm.saveClipToPalette(id, folderId)
+            savingToPalette = null
+        }
+    }
     if (showSave) {
         SaveTemplateDialog(
             initial = vm.defaultTemplateName(),
@@ -250,6 +277,12 @@ fun EditorScreen(vm: CollageViewModel) {
         )
     }
     ExportDialog(vm)
+}
+
+/** Where media chosen in the editor goes: added like "Add media", or into one empty slot. */
+private sealed interface MediaTarget {
+    data object Add : MediaTarget
+    data class Fill(val id: Long) : MediaTarget
 }
 
 @Composable
@@ -310,7 +343,12 @@ private fun AspectBar(vm: CollageViewModel, onCustom: () -> Unit) {
 }
 
 @Composable
-private fun SelectionTools(vm: CollageViewModel, onTrim: () -> Unit, onFill: (Long) -> Unit) {
+private fun SelectionTools(
+    vm: CollageViewModel,
+    onTrim: () -> Unit,
+    onFill: (Long) -> Unit,
+    onSaveToPalette: (Long) -> Unit,
+) {
     val slot = vm.selected ?: return
     val index = vm.slots.indexOf(slot)
     val item = slot.clip
@@ -349,10 +387,36 @@ private fun SelectionTools(vm: CollageViewModel, onTrim: () -> Unit, onFill: (Lo
         if (item.isVideo) {
             IconButton(onClick = onTrim) { Icon(Icons.Default.ContentCut, "Trim") }
         }
-        IconButton(onClick = { vm.clearSlot(item.id) }) { Icon(Icons.Default.HideImage, "Empty this slot") }
-        IconButton(onClick = { vm.remove(item.id) }) { Icon(Icons.Default.Delete, "Remove slot") }
+        SlotMenu(vm, item, onSaveToPalette)
     }
     if (item.isVideo) VolumeRow(vm, item)
+}
+
+@Composable
+private fun SlotMenu(vm: CollageViewModel, item: ClipItem, onSaveToPalette: (Long) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) { Icon(Icons.Default.MoreVert, "More") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            val inPalette = vm.isInPalette(item.uri)
+            DropdownMenuItem(
+                text = { Text(if (inPalette) "In palette" else "Save to palette") },
+                leadingIcon = { Icon(Icons.Default.Palette, null) },
+                enabled = !inPalette,
+                onClick = { open = false; onSaveToPalette(item.id) },
+            )
+            DropdownMenuItem(
+                text = { Text("Empty this slot") },
+                leadingIcon = { Icon(Icons.Default.HideImage, null) },
+                onClick = { open = false; vm.clearSlot(item.id) },
+            )
+            DropdownMenuItem(
+                text = { Text("Remove slot") },
+                leadingIcon = { Icon(Icons.Default.Delete, null) },
+                onClick = { open = false; vm.remove(item.id) },
+            )
+        }
+    }
 }
 
 @Composable

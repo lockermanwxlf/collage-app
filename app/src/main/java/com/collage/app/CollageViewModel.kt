@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.collage.app.export.CollageExporter
@@ -18,13 +19,20 @@ import com.collage.app.model.AspectOption
 import com.collage.app.model.ClipItem
 import com.collage.app.model.CollageLayout
 import com.collage.app.model.MediaProbe
+import com.collage.app.model.PaletteFolder
+import com.collage.app.model.PaletteIndex
+import com.collage.app.model.PaletteItem
+import com.collage.app.model.PaletteStore
 import com.collage.app.model.Ratio
 import com.collage.app.model.Slot
 import com.collage.app.model.Template
 import com.collage.app.model.TemplateStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -32,6 +40,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 sealed interface ExportState {
     data object Idle : ExportState
@@ -40,12 +49,22 @@ sealed interface ExportState {
     data class Failed(val message: String) : ExportState
 }
 
-enum class Screen { Home, Editor }
+enum class Screen { Home, Editor, Palette }
 
 class CollageViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = TemplateStore(app)
     val templates = mutableStateListOf<Template>()
+
+    private val palette = PaletteStore(app)
+    /** Index writes run one at a time, in the order the changes were made. */
+    private val paletteIo = Dispatchers.IO.limitedParallelism(1)
+    val paletteFolders = mutableStateListOf<PaletteFolder>()
+    /** Newest first. */
+    val paletteItems = mutableStateListOf<PaletteItem>()
+    /** How many items are still being copied into the palette. */
+    var paletteImporting by mutableIntStateOf(0)
+        private set
     var screen by mutableStateOf(Screen.Home)
 
     /** The cells of the collage in layout order; empty ones are waiting for media. */
@@ -58,7 +77,7 @@ class CollageViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var saving by mutableStateOf(false)
         private set
-    /** A one-off note for the editor to show, such as the result of saving a template. */
+    /** A one-off note to show, such as the result of saving a template. */
     var message by mutableStateOf<String?>(null)
 
     var aspect by mutableStateOf<AspectOption>(AspectOption.Screen)
@@ -73,12 +92,27 @@ class CollageViewModel(app: Application) : AndroidViewModel(app) {
         private set
     private var exportJob: Job? = null
     private var nextId = 1L
+    /** Autosave stays off until the last session has been restored, so it can't overwrite it. */
+    private var sessionRestored = false
 
     init {
         viewModelScope.launch {
-            // No session holds media yet, so grants that no template needs can go.
-            val loaded = withContext(Dispatchers.IO) { store.loadAll().also(store::releaseUnusedUriPermissions) }
+            val (loaded, session, index) = withContext(Dispatchers.IO) {
+                val loaded = store.loadAll()
+                val session = store.loadSession()
+                // Nothing else holds media yet, so grants that no template or the session needs can go.
+                store.releaseUnusedUriPermissions(loaded + listOfNotNull(session))
+                Triple(loaded, session, palette.load())
+            }
             templates.addAll(loaded)
+            paletteFolders.addAll(index.folders)
+            paletteItems.addAll(index.items.sortedByDescending { it.addedAt })
+            // Don't replace a collage the user started while this was loading.
+            if (session != null && slots.isEmpty()) {
+                message = missingMessage(open(session), "your last collage")
+            }
+            sessionRestored = true
+            autosave()
         }
     }
 
@@ -105,6 +139,10 @@ class CollageViewModel(app: Application) : AndroidViewModel(app) {
 
     fun thumbnailFile(template: Template): File = store.thumbnailFile(template.id)
 
+    fun thumbnailFile(item: PaletteItem): File = palette.thumbnailFile(item)
+
+    fun isInPalette(uri: Uri) = PaletteStore.isPaletteUri(getApplication(), uri)
+
     /** Fills the empty slots in order, then adds a slot for each remaining uri. */
     fun addUris(uris: List<Uri>) {
         val empty = slots.filter { it.clip == null }.map { it.id }.take(uris.size)
@@ -120,8 +158,8 @@ class CollageViewModel(app: Application) : AndroidViewModel(app) {
             val app = getApplication<Application>()
             val probed = withContext(Dispatchers.IO) {
                 uris.zip(ids).map { (uri, id) ->
-                    // Taken now so the media still works after a restart if this becomes a template.
-                    TemplateStore.persistUriPermission(app, uri)
+                    // Taken now so the media still works after a restart, in the autosaved session or a template.
+                    if (!isInPalette(uri)) TemplateStore.persistUriPermission(app, uri)
                     MediaProbe.probe(app, uri, id)
                 }
             }
@@ -201,27 +239,170 @@ class CollageViewModel(app: Application) : AndroidViewModel(app) {
     fun branchFrom(template: Template) {
         if (branching) return
         branching = true
-        val ids = template.slots.map { nextId++ }
         viewModelScope.launch {
-            val restored = withContext(Dispatchers.IO) {
-                template.slots.zip(ids).map { (saved, id) -> saved?.let { store.restoreClip(it, id) } }
-            }
-            resetSession()
-            aspect = template.aspect
-            customRatio = template.customRatio
-            resolution = template.resolution
-            customDurationMs = template.customDurationMs
-            ids.zip(restored).forEach { (id, clip) -> slots.add(Slot(id, clip)) }
-            selectedId = slots.firstOrNull { it.clip == null }?.id
-            val missing = template.slots.zip(restored).count { (saved, clip) -> saved != null && clip == null }
-            message = when (missing) {
-                0 -> null
-                1 -> "1 clip from this template couldn't be found, so its slot is empty"
-                else -> "$missing clips from this template couldn't be found, so their slots are empty"
-            }
+            message = missingMessage(open(template), "this template")
             branching = false
             screen = Screen.Editor
         }
+    }
+
+    /**
+     * Replaces the session with [template]'s slots and settings. Returns how many of its clips
+     * couldn't be found; their slots are left empty.
+     */
+    private suspend fun open(template: Template): Int {
+        val ids = template.slots.map { nextId++ }
+        val restored = withContext(Dispatchers.IO) {
+            template.slots.zip(ids).map { (saved, id) -> saved?.let { store.restoreClip(it, id) } }
+        }
+        resetSession()
+        aspect = template.aspect
+        customRatio = template.customRatio
+        resolution = template.resolution
+        customDurationMs = template.customDurationMs
+        ids.zip(restored).forEach { (id, clip) -> slots.add(Slot(id, clip)) }
+        selectedId = slots.firstOrNull { it.clip == null }?.id
+        return template.slots.zip(restored).count { (saved, clip) -> saved != null && clip == null }
+    }
+
+    private fun missingMessage(missing: Int, from: String) = when (missing) {
+        0 -> null
+        1 -> "1 clip from $from couldn't be found, so its slot is empty"
+        else -> "$missing clips from $from couldn't be found, so their slots are empty"
+    }
+
+    /** The in-progress collage in the template format, or null when there's nothing to keep. */
+    private fun sessionSnapshot(): Template? = if (slots.isEmpty()) null else Template(
+        id = "session",
+        name = "",
+        createdAt = 0,
+        aspect = aspect,
+        customRatio = customRatio,
+        resolution = resolution,
+        customDurationMs = customDurationMs,
+        slots = slots.map { it.clip?.copy(id = 0) },
+    )
+
+    @OptIn(FlowPreview::class)
+    private fun autosave() {
+        viewModelScope.launch {
+            snapshotFlow { sessionSnapshot() }
+                .distinctUntilChanged()
+                .debounce(AUTOSAVE_DELAY_MS)
+                .collect { withContext(Dispatchers.IO) { store.writeSession(it) } }
+        }
+    }
+
+    /** Saves the in-progress collage right away, for when the app goes to the background. */
+    fun flushSession() {
+        if (sessionRestored) store.writeSession(sessionSnapshot())
+    }
+
+    fun paletteUri(item: PaletteItem): Uri = palette.uriOf(item)
+
+    private fun writePalette() {
+        val index = PaletteIndex(paletteFolders.toList(), paletteItems.toList())
+        viewModelScope.launch(paletteIo) { palette.write(index) }
+    }
+
+    /** Copies media from the device into the palette, into [folderId] or no folder. */
+    fun importToPalette(uris: List<Uri>, folderId: String?) {
+        if (uris.isEmpty()) return
+        paletteImporting += uris.size
+        viewModelScope.launch {
+            var failed = 0
+            uris.forEach { uri ->
+                val item = withContext(Dispatchers.IO) { palette.import(uri, folderId) }
+                paletteImporting -= 1
+                if (item == null) failed++ else addToPalette(item)
+            }
+            if (failed > 0) message = "$failed ${if (failed == 1) "item" else "items"} couldn't be copied into the palette"
+        }
+    }
+
+    /**
+     * Copies a slot's media into the palette and points the collage at the copy, so it keeps
+     * working even if the original is deleted from the device.
+     */
+    fun saveClipToPalette(id: Long, folderId: String?) {
+        val clip = slots.firstOrNull { it.id == id }?.clip ?: return
+        if (isInPalette(clip.uri)) return
+        paletteImporting += 1
+        viewModelScope.launch {
+            val item = withContext(Dispatchers.IO) { palette.import(clip.uri, folderId) }
+            paletteImporting -= 1
+            if (item == null) {
+                message = "Couldn't copy this media into the palette"
+                return@launch
+            }
+            addToPalette(item)
+            val uri = palette.uriOf(item)
+            for (i in slots.indices) {
+                val c = slots[i].clip
+                if (c?.uri == clip.uri) slots[i] = slots[i].copy(clip = c.copy(uri = uri))
+            }
+            message = "Saved to palette"
+        }
+    }
+
+    private fun addToPalette(item: PaletteItem) {
+        // The folder may have been deleted while the media was copying.
+        val folderId = item.folderId?.takeIf { id -> paletteFolders.any { it.id == id } }
+        paletteItems.add(0, item.copy(folderId = folderId))
+        writePalette()
+    }
+
+    /** Adds palette items the same way as media picked from the device. */
+    fun addFromPalette(items: List<PaletteItem>) = addUris(items.map(palette::uriOf))
+
+    fun fillSlotFromPalette(id: Long, item: PaletteItem) = fillSlot(id, palette.uriOf(item))
+
+    fun createFolder(name: String): PaletteFolder {
+        val folder = PaletteFolder(UUID.randomUUID().toString(), name.trim())
+        paletteFolders.add(folder)
+        writePalette()
+        return folder
+    }
+
+    fun renameFolder(id: String, name: String) {
+        val i = paletteFolders.indexOfFirst { it.id == id }
+        if (i < 0) return
+        paletteFolders[i] = paletteFolders[i].copy(name = name.trim())
+        writePalette()
+    }
+
+    /** Deletes the folder; its items stay in the palette without a folder. */
+    fun deleteFolder(id: String) {
+        paletteFolders.removeAll { it.id == id }
+        for (i in paletteItems.indices) {
+            if (paletteItems[i].folderId == id) paletteItems[i] = paletteItems[i].copy(folderId = null)
+        }
+        writePalette()
+    }
+
+    fun moveToFolder(item: PaletteItem, folderId: String?) {
+        val i = paletteItems.indexOfFirst { it.id == item.id }
+        if (i < 0) return
+        paletteItems[i] = paletteItems[i].copy(folderId = folderId)
+        writePalette()
+    }
+
+    fun renamePaletteItem(item: PaletteItem, name: String) {
+        val i = paletteItems.indexOfFirst { it.id == item.id }
+        if (i < 0) return
+        paletteItems[i] = paletteItems[i].copy(name = name.trim())
+        writePalette()
+    }
+
+    /** Deletes the copy. Slots of the current collage that use it become empty. */
+    fun deletePaletteItem(item: PaletteItem) {
+        paletteItems.removeAll { it.id == item.id }
+        writePalette()
+        val uri = palette.uriOf(item)
+        for (i in slots.indices) {
+            if (slots[i].clip?.uri == uri) slots[i] = Slot(slots[i].id)
+        }
+        viewModelScope.launch(paletteIo) { palette.deleteFiles(item) }
     }
 
     fun defaultTemplateName(): String =
@@ -322,6 +503,7 @@ class CollageViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         const val DEFAULT_IMAGE_ONLY_MS = 5_000L
         const val DEFAULT_RESOLUTION = 1080
+        const val AUTOSAVE_DELAY_MS = 500L
         val DEFAULT_CUSTOM_RATIO = Ratio(5, 4)
     }
 }
