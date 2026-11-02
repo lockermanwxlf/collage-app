@@ -39,6 +39,12 @@ data class ClipItem(
     val trimmedMs get() = (trimEndMs - trimStartMs).coerceAtLeast(1)
 }
 
+/**
+ * One cell of the collage. [clip] is null while the cell is waiting for media; when filled, the
+ * clip's id equals the slot's [id], which stays the same as the slot is filled and cleared.
+ */
+data class Slot(val id: Long, val clip: ClipItem? = null)
+
 data class Ratio(val w: Int, val h: Int) {
     val value get() = w.toFloat() / h
     override fun toString() = "$w:$h"

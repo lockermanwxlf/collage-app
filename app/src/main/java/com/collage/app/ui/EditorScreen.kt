@@ -1,6 +1,7 @@
 package com.collage.app.ui
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,10 +27,13 @@ import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddBox
+import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FilterCenterFocus
+import androidx.compose.material.icons.filled.HideImage
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -45,16 +49,21 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -63,10 +72,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.collage.app.CollageViewModel
 import com.collage.app.ExportState
+import com.collage.app.Screen
 import com.collage.app.model.AspectOption
 import com.collage.app.model.ClipItem
 import com.collage.app.model.CollageLayout
 import com.collage.app.model.Ratio
+import kotlinx.coroutines.flow.filterNotNull
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -76,19 +87,47 @@ fun EditorScreen(vm: CollageViewModel) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
         vm.addUris(uris)
     }
+    var fillTarget by rememberSaveable { mutableStateOf<Long?>(null) }
+    val slotPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val id = fillTarget
+        if (uri != null && id != null) vm.fillSlot(id, uri)
+        fillTarget = null
+    }
+    val pickForSlot = { id: Long ->
+        fillTarget = id
+        slotPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+    }
     var showTrim by remember { mutableStateOf(false) }
+    var showSave by remember { mutableStateOf(false) }
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        snapshotFlow { vm.message }.filterNotNull().collect { m ->
+            vm.message = null
+            snackbar.showSnackbar(m)
+        }
+    }
+    BackHandler { vm.screen = Screen.Home }
     var showDuration by remember { mutableStateOf(false) }
     var showCustomRatio by remember { mutableStateOf(false) }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text("Collage") },
+                navigationIcon = {
+                    IconButton(onClick = { vm.screen = Screen.Home }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Home")
+                    }
+                },
                 actions = {
                     ResolutionMenu(vm.resolution) { vm.resolution = it }
+                    IconButton(onClick = { showSave = true }, enabled = vm.slots.isNotEmpty() && !vm.saving) {
+                        Icon(Icons.Default.BookmarkAdd, "Save as template")
+                    }
                     Button(
                         onClick = { vm.export() },
-                        enabled = vm.items.isNotEmpty(),
+                        enabled = vm.canExport,
                         modifier = Modifier.padding(end = 8.dp),
                     ) {
                         Icon(Icons.Default.FileDownload, null, Modifier.size(18.dp))
@@ -119,13 +158,14 @@ fun EditorScreen(vm: CollageViewModel) {
                 }
                 val canvasModifier = with(density) { Modifier.size(wPx.toDp(), hPx.toDp()) }
                 CollageCanvas(
-                    items = vm.items,
+                    slots = vm.slots,
                     selectedId = vm.selectedId,
                     onSelect = { vm.selectedId = it },
                     onTransform = vm::setTransform,
+                    onFillEmpty = pickForSlot,
                     modifier = canvasModifier,
                 )
-                if (vm.items.isEmpty()) {
+                if (vm.slots.isEmpty()) {
                     Text(
                         if (vm.loading > 0) "Loading…" else "Add photos or videos to start",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -140,7 +180,7 @@ fun EditorScreen(vm: CollageViewModel) {
                         .navigationBarsPadding()
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                 ) {
-                    SelectionTools(vm, onTrim = { showTrim = true })
+                    SelectionTools(vm, onTrim = { showTrim = true }, onFill = pickForSlot)
                     Row(
                         Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -153,6 +193,11 @@ fun EditorScreen(vm: CollageViewModel) {
                             Spacer(Modifier.width(6.dp))
                             Text("Add media")
                         }
+                        TextButton(onClick = vm::addEmptySlot) {
+                            Icon(Icons.Default.AddBox, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Empty slot")
+                        }
                         Spacer(Modifier.weight(1f))
                         TextButton(onClick = { showDuration = true }) {
                             Icon(Icons.Default.Timer, null, Modifier.size(18.dp))
@@ -161,8 +206,10 @@ fun EditorScreen(vm: CollageViewModel) {
                         }
                     }
                     val (ow, oh) = CollageLayout.outputSize(vm.ratio, vm.resolution)
+                    val empty = vm.emptySlotCount
                     Text(
-                        "${vm.items.size} inputs · $ow×$oh · 30 fps",
+                        "${vm.slots.size} slots · $ow×$oh · 30 fps" +
+                            if (empty > 0) " · fill $empty empty ${if (empty == 1) "slot" else "slots"} to export" else "",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -171,7 +218,7 @@ fun EditorScreen(vm: CollageViewModel) {
         }
     }
 
-    val selected = vm.selected
+    val selected = vm.selected?.clip
     if (showTrim && selected != null && selected.isVideo) {
         TrimDialog(
             item = selected,
@@ -194,7 +241,43 @@ fun EditorScreen(vm: CollageViewModel) {
             onConfirm = { vm.customRatio = it; vm.aspect = AspectOption.Custom; showCustomRatio = false },
         )
     }
+    if (showSave) {
+        SaveTemplateDialog(
+            initial = vm.defaultTemplateName(),
+            emptyCount = vm.emptySlotCount,
+            onDismiss = { showSave = false },
+            onConfirm = { vm.saveTemplate(it); showSave = false },
+        )
+    }
     ExportDialog(vm)
+}
+
+@Composable
+private fun SaveTemplateDialog(initial: String, emptyCount: Int, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var name by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save as template") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it.take(60) },
+                    label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Filled slots keep their media, trim and volume. " +
+                        if (emptyCount > 0) "$emptyCount empty ${if (emptyCount == 1) "slot stays" else "slots stay"} open to fill later."
+                        else "Add empty slots to leave room for new media.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = name.isNotBlank(), onClick = { onConfirm(name.trim()) }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -227,9 +310,24 @@ private fun AspectBar(vm: CollageViewModel, onCustom: () -> Unit) {
 }
 
 @Composable
-private fun SelectionTools(vm: CollageViewModel, onTrim: () -> Unit) {
-    val item = vm.selected ?: return
-    val index = vm.items.indexOf(item)
+private fun SelectionTools(vm: CollageViewModel, onTrim: () -> Unit, onFill: (Long) -> Unit) {
+    val slot = vm.selected ?: return
+    val index = vm.slots.indexOf(slot)
+    val item = slot.clip
+    if (item == null) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("#${index + 1} Empty slot", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+            IconButton(onClick = { vm.move(slot.id, -1) }, enabled = index > 0) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Move earlier")
+            }
+            IconButton(onClick = { vm.move(slot.id, 1) }, enabled = index < vm.slots.lastIndex) {
+                Icon(Icons.AutoMirrored.Filled.ArrowForward, "Move later")
+            }
+            TextButton(onClick = { onFill(slot.id) }) { Text("Choose media") }
+            IconButton(onClick = { vm.remove(slot.id) }) { Icon(Icons.Default.Delete, "Remove slot") }
+        }
+        return
+    }
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -242,7 +340,7 @@ private fun SelectionTools(vm: CollageViewModel, onTrim: () -> Unit) {
         IconButton(onClick = { vm.move(item.id, -1) }, enabled = index > 0) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Move earlier")
         }
-        IconButton(onClick = { vm.move(item.id, 1) }, enabled = index < vm.items.lastIndex) {
+        IconButton(onClick = { vm.move(item.id, 1) }, enabled = index < vm.slots.lastIndex) {
             Icon(Icons.AutoMirrored.Filled.ArrowForward, "Move later")
         }
         IconButton(onClick = { vm.resetTransform(item.id) }) {
@@ -251,7 +349,8 @@ private fun SelectionTools(vm: CollageViewModel, onTrim: () -> Unit) {
         if (item.isVideo) {
             IconButton(onClick = onTrim) { Icon(Icons.Default.ContentCut, "Trim") }
         }
-        IconButton(onClick = { vm.remove(item.id) }) { Icon(Icons.Default.Delete, "Remove") }
+        IconButton(onClick = { vm.clearSlot(item.id) }) { Icon(Icons.Default.HideImage, "Empty this slot") }
+        IconButton(onClick = { vm.remove(item.id) }) { Icon(Icons.Default.Delete, "Remove slot") }
     }
     if (item.isVideo) VolumeRow(vm, item)
 }

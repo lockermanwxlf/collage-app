@@ -17,6 +17,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.platform.LocalContext
 import com.collage.app.model.Ratio
 import com.collage.app.ui.EditorScreen
+import com.collage.app.ui.HomeScreen
 import kotlin.math.max
 import kotlin.math.min
 
@@ -36,7 +37,10 @@ class MainActivity : ComponentActivity() {
                 else -> lightColorScheme()
             }
             MaterialTheme(colorScheme = scheme) {
-                EditorScreen(vm)
+                when (vm.screen) {
+                    Screen.Home -> HomeScreen(vm)
+                    Screen.Editor -> EditorScreen(vm)
+                }
             }
         }
     }

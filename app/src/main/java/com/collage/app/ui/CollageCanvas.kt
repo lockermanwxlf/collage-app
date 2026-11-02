@@ -6,6 +6,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -36,10 +38,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -60,45 +64,80 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.collage.app.model.ClipItem
 import com.collage.app.model.CollageLayout
 import com.collage.app.model.MediaProbe
+import com.collage.app.model.Slot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-/** Live preview of the collage at the output aspect ratio. Each cell is pannable/zoomable. */
+/**
+ * Live preview of the collage at the output aspect ratio. Each filled cell is pannable/zoomable;
+ * tapping an empty cell selects it and calls [onFillEmpty].
+ */
 @Composable
 fun CollageCanvas(
-    items: List<ClipItem>,
+    slots: List<Slot>,
     selectedId: Long?,
     onSelect: (Long) -> Unit,
     onTransform: (id: Long, scale: Float, offsetX: Float, offsetY: Float) -> Unit,
+    onFillEmpty: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier.background(Color.Black).clipToBounds()) {
         val density = LocalDensity.current
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
-        val cells = CollageLayout.cells(items.size, w, h)
-        items.forEachIndexed { i, item ->
+        val cells = CollageLayout.cells(slots.size, w, h)
+        slots.forEachIndexed { i, slot ->
             val cell = cells[i]
             val l = cell.left.roundToInt()
             val t = cell.top.roundToInt()
             val cw = cell.right.roundToInt() - l
             val ch = cell.bottom.roundToInt() - t
-            androidx.compose.runtime.key(item.id) {
-                CollageCell(
-                    item = item,
-                    selected = item.id == selectedId,
-                    cellW = cw,
-                    cellH = ch,
-                    onSelect = { onSelect(item.id) },
-                    onTransform = { s, x, y -> onTransform(item.id, s, x, y) },
-                    modifier = Modifier
-                        .offset { IntOffset(l, t) }
-                        .size(with(density) { cw.toDp() }, with(density) { ch.toDp() }),
-                )
+            val cellModifier = Modifier
+                .offset { IntOffset(l, t) }
+                .size(with(density) { cw.toDp() }, with(density) { ch.toDp() })
+            androidx.compose.runtime.key(slot.id) {
+                val item = slot.clip
+                if (item == null) {
+                    EmptyCell(
+                        selected = slot.id == selectedId,
+                        onClick = { onSelect(slot.id); onFillEmpty(slot.id) },
+                        modifier = cellModifier,
+                    )
+                } else {
+                    CollageCell(
+                        item = item,
+                        selected = item.id == selectedId,
+                        cellW = cw,
+                        cellH = ch,
+                        onSelect = { onSelect(item.id) },
+                        onTransform = { s, x, y -> onTransform(item.id, s, x, y) },
+                        modifier = cellModifier,
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun EmptyCell(selected: Boolean, onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier
+            .background(Color(0xFF1C1C1C))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        val outline = if (selected) MaterialTheme.colorScheme.primary else Color(0xFF8A8A8A)
+        Canvas(Modifier.fillMaxSize().padding(6.dp)) {
+            drawRoundRect(
+                color = outline,
+                cornerRadius = CornerRadius(8.dp.toPx()),
+                style = Stroke(width = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))),
+            )
+        }
+        Icon(Icons.Default.Add, contentDescription = "Add media to empty slot", tint = outline, modifier = Modifier.size(32.dp))
     }
 }
 
